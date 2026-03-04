@@ -4,6 +4,7 @@ from detectors.detector import AttackDetector
 from services.abuseipdb import AbuseIPDB
 from services.discord import DiscordNotifier
 from services.ip_fetcher import IPFetcher
+from services.database import ReportDatabase
 from config import CHECK_INTERVAL, ABUSEIPDB_CHECK_ENABLED
 
 class NetworkMonitor:
@@ -12,6 +13,7 @@ class NetworkMonitor:
         self.abuseipdb = AbuseIPDB()
         self.discord = DiscordNotifier()
         self.ip_fetcher = IPFetcher()
+        self.db = ReportDatabase()
         self.suspicious_ips = set()
         self.external_ips_to_check = set()
     
@@ -45,12 +47,15 @@ class NetworkMonitor:
                         total_reports = reports_info['data']['total']
                         fields.append({'name': 'Total Reports (Detailed)', 'value': str(total_reports), 'inline': True})
                     
-                    self.discord.send_webhook(
-                        'Suspicious IP from External List',
-                        'IP from external list has high abuse confidence',
-                        fields,
-                        color=16753920
-                    )
+                    if not self.db.is_reported(ip, 'external_suspicious'):
+                        self.discord.send_webhook(
+                            'Suspicious IP from External List',
+                            'IP from external list has high abuse confidence',
+                            fields,
+                            color=16753920
+                        )
+                        details = f"Abuse Confidence: {abuse_info['abuseConfidencePercentage']}%, Reports: {abuse_info['totalReports']}"
+                        self.db.add_report(ip, 'external_suspicious', None, details)
                     self.suspicious_ips.add(ip)
     
     def detect_suspicious_activity(self):
@@ -99,6 +104,7 @@ class NetworkMonitor:
         print(f"AbuseIPDB enabled: {ABUSEIPDB_CHECK_ENABLED}")
         
         external_check_counter = 0
+        cleanup_counter = 0
         
         while True:
             try:
@@ -109,6 +115,11 @@ class NetworkMonitor:
                     self.update_external_ips()
                     self.check_external_ips()
                     external_check_counter = 0
+                
+                cleanup_counter += 1
+                if cleanup_counter >= 1440:
+                    self.db.cleanup_old_reports(30)
+                    cleanup_counter = 0
                 
                 time.sleep(CHECK_INTERVAL)
             except KeyboardInterrupt:

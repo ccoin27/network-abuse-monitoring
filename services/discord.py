@@ -1,10 +1,12 @@
 import requests
 from datetime import datetime
 from config import DISCORD_WEBHOOK_URL
+from services.database import ReportDatabase
 
 class DiscordNotifier:
     def __init__(self):
         self.webhook_url = DISCORD_WEBHOOK_URL
+        self.db = ReportDatabase()
     
     def send_webhook(self, title, description, fields, color=16711680):
         if not self.webhook_url:
@@ -28,6 +30,9 @@ class DiscordNotifier:
             pass
     
     def report_port_scan(self, ip, ports, abuse_info=None, reports_info=None):
+        if self.db.is_reported(ip, 'port_scan'):
+            return
+        
         fields = [
             {'name': 'IP Address', 'value': ip, 'inline': True},
             {'name': 'Ports Scanned', 'value': str(len(ports)), 'inline': True},
@@ -73,8 +78,14 @@ class DiscordNotifier:
             'Potential port scanning activity detected from internal network',
             fields
         )
+        
+        details = f"Ports: {ports_str}"
+        self.db.add_report(ip, 'port_scan', None, details)
     
     def report_bruteforce(self, ip, port, attempts, abuse_info=None, reports_info=None):
+        if self.db.is_reported(ip, 'bruteforce', port):
+            return
+        
         port_names = {22: 'SSH', 23: 'Telnet', 3389: 'RDP', 3306: 'MySQL', 5432: 'PostgreSQL'}
         port_name = port_names.get(port, f'Port {port}')
         
@@ -118,8 +129,14 @@ class DiscordNotifier:
             fields,
             color=16753920
         )
+        
+        details = f"Service: {port_name}, Attempts: {attempts}"
+        self.db.add_report(ip, 'bruteforce', port, details)
     
     def report_ddos(self, ip, abuse_info=None):
+        if self.db.is_reported(ip, 'ddos'):
+            return
+        
         fields = [
             {'name': 'IP Address', 'value': ip, 'inline': True},
             {'name': 'Time', 'value': datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'inline': False}
@@ -132,3 +149,8 @@ class DiscordNotifier:
             fields,
             color=8388608
         )
+        
+        details = f"DDoS pattern detected"
+        if abuse_info:
+            details += f", Confidence: {abuse_info['abuseConfidencePercentage']}%"
+        self.db.add_report(ip, 'ddos', None, details)
