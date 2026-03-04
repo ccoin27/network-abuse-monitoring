@@ -393,3 +393,7 @@ MIT
 ## Support
 
 If you encounter any issues, please create an issue in the repository.
+
+## Credits
+
+Created specially for https://satx.cloud
