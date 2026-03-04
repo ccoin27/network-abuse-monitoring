@@ -1,4 +1,4 @@
-import os
+import subprocess
 import threading
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -11,60 +11,79 @@ class AttackDetector:
         self.bruteforce_detected = set()
         self.ddos_detected = set()
         self.lock = threading.Lock()
+        self.connection_cache = []
+        self.cache_time = None
+        self.cache_ttl = 5
+        self.bruteforce_ports = {22, 23, 3389, 3306, 5432, 1433, 1521, 6379}
     
     def get_outgoing_connections(self):
+        now = datetime.now()
+        if self.cache_time and (now - self.cache_time).total_seconds() < self.cache_ttl:
+            return self.connection_cache
+        
         try:
-            result = os.popen('ss -tn').read()
-            connections = []
-            for line in result.split('\n'):
-                if 'ESTAB' in line or 'SYN-SENT' in line or 'SYN-RECV' in line:
-                    parts = line.split()
-                    if len(parts) >= 5:
-                        remote = parts[4]
-                        if ':' in remote:
-                            try:
-                                if '[' in remote and ']' in remote:
-                                    ipv6_part = remote.split(']')[0] + ']'
-                                    ip = ipv6_part[1:-1]
-                                    port_str = remote.split(']')[1]
-                                    if port_str.startswith(':'):
-                                        port = int(port_str[1:])
-                                    else:
-                                        continue
-                                else:
-                                    ip, port = remote.rsplit(':', 1)
-                                    port = int(port)
-                                connections.append((ip, port))
-                            except:
-                                pass
-            return connections
-        except Exception:
-            try:
-                result = os.popen('netstat -tn').read()
-                connections = []
-                for line in result.split('\n'):
-                    if 'ESTABLISHED' in line or 'SYN_SENT' in line:
-                        parts = line.split()
-                        if len(parts) >= 5:
-                            remote = parts[4]
-                            if ':' in remote:
-                                try:
-                                    if '[' in remote and ']' in remote:
-                                        ip = remote.split(']')[0].split('[')[1]
-                                        port_str = remote.split(']')[1]
-                                        if port_str.startswith(':'):
-                                            port = int(port_str[1:])
-                                        else:
-                                            continue
-                                    else:
-                                        ip, port = remote.rsplit(':', 1)
-                                        port = int(port)
-                                    connections.append((ip, port))
-                                except:
-                                    pass
+            result = subprocess.run(['ss', '-tn'], capture_output=True, text=True, timeout=2)
+            if result.returncode == 0:
+                connections = self._parse_ss_output(result.stdout)
+                self.connection_cache = connections
+                self.cache_time = now
                 return connections
-            except Exception:
-                return []
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+            pass
+        
+        try:
+            result = subprocess.run(['netstat', '-tn'], capture_output=True, text=True, timeout=2)
+            if result.returncode == 0:
+                connections = self._parse_netstat_output(result.stdout)
+                self.connection_cache = connections
+                self.cache_time = now
+                return connections
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+            pass
+        
+        return self.connection_cache if self.connection_cache else []
+    
+    def _parse_ss_output(self, output):
+        connections = []
+        for line in output.split('\n'):
+            if 'ESTAB' in line or 'SYN-SENT' in line:
+                parts = line.split()
+                if len(parts) >= 5:
+                    remote = parts[4]
+                    if ':' in remote:
+                        try:
+                            if '[' in remote:
+                                idx = remote.rindex(']')
+                                ip = remote[1:idx]
+                                port = int(remote[idx+2:])
+                            else:
+                                ip, port = remote.rsplit(':', 1)
+                                port = int(port)
+                            connections.append((ip, port))
+                        except (ValueError, IndexError):
+                            continue
+        return connections
+    
+    def _parse_netstat_output(self, output):
+        connections = []
+        for line in output.split('\n'):
+            if 'ESTABLISHED' in line or 'SYN_SENT' in line:
+                parts = line.split()
+                if len(parts) >= 5:
+                    remote = parts[4]
+                    if ':' in remote:
+                        try:
+                            if '[' in remote:
+                                idx = remote.rindex(']')
+                                ip = remote[remote.index('[')+1:idx]
+                                port = int(remote[idx+2:])
+                            else:
+                                ip, port = remote.rsplit(':', 1)
+                                port = int(port)
+                            connections.append((ip, port))
+                        except (ValueError, IndexError):
+                            continue
+        return connections
     
     def detect_port_scan(self, ip, port):
         with self.lock:
@@ -80,18 +99,20 @@ class AttackDetector:
             return False
     
     def detect_bruteforce(self, ip, port):
+        if port not in self.bruteforce_ports:
+            return False
+        
         with self.lock:
             if ip in self.bruteforce_detected:
                 return False
             
-            if port in [22, 23, 3389, 3306, 5432, 1433, 1521, 6379]:
-                self.connections[ip]['attempts'] += 1
-                self.connections[ip]['last_seen'] = datetime.now()
-                
-                if self.connections[ip]['attempts'] >= BRUTEFORCE_THRESHOLD:
-                    self.bruteforce_detected.add(ip)
-                    return True
-            return False
+            self.connections[ip]['attempts'] += 1
+            self.connections[ip]['last_seen'] = datetime.now()
+            
+            if self.connections[ip]['attempts'] >= BRUTEFORCE_THRESHOLD:
+                self.bruteforce_detected.add(ip)
+                return True
+        return False
     
     def detect_ddos_pattern(self, ip):
         with self.lock:

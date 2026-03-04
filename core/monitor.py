@@ -30,10 +30,13 @@ class NetworkMonitor:
         if not self.external_ips_to_check:
             return
         
-        for ip in list(self.external_ips_to_check):
-            if self.abuseipdb.can_check(ip):
-                abuse_info = self.abuseipdb.check_ip(ip)
-                if abuse_info and abuse_info.get('abuseConfidencePercentage', 0) > 25:
+        for ip in list(self.external_ips_to_check)[:10]:
+            if not self.abuseipdb.can_check(ip):
+                continue
+            
+            abuse_info = self.abuseipdb.check_ip(ip)
+            if abuse_info and abuse_info.get('abuseConfidencePercentage', 0) > 25:
+                if not self.db.is_reported(ip, 'external_suspicious'):
                     reports_info = self.abuseipdb.get_reports(ip)
                     fields = [
                         {'name': 'IP Address', 'value': ip, 'inline': True},
@@ -47,54 +50,78 @@ class NetworkMonitor:
                         total_reports = reports_info['data']['total']
                         fields.append({'name': 'Total Reports (Detailed)', 'value': str(total_reports), 'inline': True})
                     
-                    if not self.db.is_reported(ip, 'external_suspicious'):
-                        self.discord.send_webhook(
-                            'Suspicious IP from External List',
-                            'IP from external list has high abuse confidence',
-                            fields,
-                            color=16753920
-                        )
-                        details = f"Abuse Confidence: {abuse_info['abuseConfidencePercentage']}%, Reports: {abuse_info['totalReports']}"
-                        self.db.add_report(ip, 'external_suspicious', None, details)
-                    self.suspicious_ips.add(ip)
+                    self.discord.send_webhook(
+                        'Suspicious IP from External List',
+                        'IP from external list has high abuse confidence',
+                        fields,
+                        color=16753920
+                    )
+                    details = f"Abuse Confidence: {abuse_info['abuseConfidencePercentage']}%, Reports: {abuse_info['totalReports']}"
+                    self.db.add_report(ip, 'external_suspicious', None, details)
+                self.suspicious_ips.add(ip)
+            
+            time.sleep(0.1)
     
     def detect_suspicious_activity(self):
         connections = self.detector.get_outgoing_connections()
         
-        for ip, port in connections:
+        if not connections:
+            return
+        
+        processed_ips = set()
+        port_scan_ips = []
+        bruteforce_ips = []
+        ddos_ips = []
+        
+        for ip, port in connections[:500]:
+            if ip in processed_ips:
+                continue
+            
             if self.detector.detect_port_scan(ip, port):
-                conn_info = self.detector.get_connection_info(ip)
-                ports = conn_info['ports'] if conn_info else set()
-                
-                abuse_info = None
-                reports_info = None
-                if ABUSEIPDB_CHECK_ENABLED:
-                    abuse_info = self.abuseipdb.check_ip(ip)
-                    if abuse_info and abuse_info.get('abuseConfidencePercentage', 0) > 25:
-                        reports_info = self.abuseipdb.get_reports(ip)
-                        self.suspicious_ips.add(ip)
-                
-                self.discord.report_port_scan(ip, ports, abuse_info, reports_info)
+                port_scan_ips.append(ip)
+                processed_ips.add(ip)
             
             if self.detector.detect_bruteforce(ip, port):
-                conn_info = self.detector.get_connection_info(ip)
-                attempts = conn_info['attempts'] if conn_info else 0
-                
-                abuse_info = None
-                reports_info = None
-                if ABUSEIPDB_CHECK_ENABLED:
-                    abuse_info = self.abuseipdb.check_ip(ip)
-                    if abuse_info and abuse_info.get('abuseConfidencePercentage', 0) > 25:
-                        reports_info = self.abuseipdb.get_reports(ip)
-                        self.suspicious_ips.add(ip)
-                
-                self.discord.report_bruteforce(ip, port, attempts, abuse_info, reports_info)
+                bruteforce_ips.append((ip, port))
+                processed_ips.add(ip)
             
             if self.detector.detect_ddos_pattern(ip):
-                abuse_info = None
-                if ABUSEIPDB_CHECK_ENABLED:
-                    abuse_info = self.abuseipdb.check_ip(ip)
-                self.discord.report_ddos(ip, abuse_info)
+                ddos_ips.append(ip)
+                processed_ips.add(ip)
+        
+        for ip in port_scan_ips:
+            conn_info = self.detector.get_connection_info(ip)
+            ports = conn_info['ports'] if conn_info else set()
+            
+            abuse_info = None
+            reports_info = None
+            if ABUSEIPDB_CHECK_ENABLED and self.abuseipdb.can_check(ip):
+                abuse_info = self.abuseipdb.check_ip(ip)
+                if abuse_info and abuse_info.get('abuseConfidencePercentage', 0) > 25:
+                    reports_info = self.abuseipdb.get_reports(ip)
+                    self.suspicious_ips.add(ip)
+            
+            self.discord.report_port_scan(ip, ports, abuse_info, reports_info)
+        
+        for ip, port in bruteforce_ips:
+            conn_info = self.detector.get_connection_info(ip)
+            attempts = conn_info['attempts'] if conn_info else 0
+            
+            abuse_info = None
+            reports_info = None
+            if ABUSEIPDB_CHECK_ENABLED and self.abuseipdb.can_check(ip):
+                abuse_info = self.abuseipdb.check_ip(ip)
+                if abuse_info and abuse_info.get('abuseConfidencePercentage', 0) > 25:
+                    reports_info = self.abuseipdb.get_reports(ip)
+                    self.suspicious_ips.add(ip)
+            
+            self.discord.report_bruteforce(ip, port, attempts, abuse_info, reports_info)
+        
+        for ip in ddos_ips:
+            abuse_info = None
+            if ABUSEIPDB_CHECK_ENABLED and self.abuseipdb.can_check(ip):
+                abuse_info = self.abuseipdb.check_ip(ip)
+            self.discord.report_ddos(ip, abuse_info)
         
         self.detector.cleanup_old_connections()
     
@@ -128,3 +155,5 @@ class NetworkMonitor:
             except Exception as e:
                 print(f"Error: {e}")
                 time.sleep(CHECK_INTERVAL)
+        
+        self.db.close()

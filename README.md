@@ -27,7 +27,7 @@ A tool for monitoring internal networks for various types of attacks and abuse. 
 Run the setup script to automatically install dependencies and create a systemd service:
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/ccoin27/network-abuse-monitoring
 cd network-abuse-monitoring
 chmod +x setup.sh
 sudo ./setup.sh
