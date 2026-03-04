@@ -48,7 +48,7 @@ sudo systemctl start network-abuse-monitor
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
+git clone https://github.com/ccoin27/network-abuse-monitoring
 cd network-abuse-monitoring
 ```
 
